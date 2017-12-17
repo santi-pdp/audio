@@ -115,7 +115,7 @@ class VCTK(data.Dataset):
             index (int): Index
 
         Returns:
-            tuple: (image, target) where target is index of the target class.
+            tuple: (audio, target, spk_id) where target is a utterance
         """
         if self.cached_pt != index // self.chunk_size:
             self.cached_pt = int(index // self.chunk_size)
