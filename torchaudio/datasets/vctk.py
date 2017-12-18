@@ -82,6 +82,8 @@ class VCTK(data.Dataset):
             target and transforms it.
         dev_mode(bool, optional): if true, clean up is not performed on downloaded
             files.  Useful to keep raw audio and transcriptions.
+        maxlen(int, optional): if specified, wavs are trimmed to maxlen
+            (randomly chunked).
     """
     raw_folder = 'vctk/raw'
     processed_folder = 'vctk/processed'
@@ -93,7 +95,7 @@ class VCTK(data.Dataset):
 
     def __init__(self, root, downsample=True, transform=None,
                  target_transform=None, download=False, dev_mode=False,
-                 split='train'):
+                 split='train', maxlen=None):
         self.root = os.path.expanduser(root)
         self.downsample = downsample
         self.transform = transform
@@ -106,6 +108,7 @@ class VCTK(data.Dataset):
         self.max_len = 0
         self.cached_pt = 0
         self.split = split
+        self.maxlen = maxlen
 
         if download:
             self.download()
@@ -138,6 +141,15 @@ class VCTK(data.Dataset):
         audio = self.data[index]
         target = self.labels[index]
         spk_id = self.spk_ids[index]
+
+        if self.maxlen is not None:
+            # trim with random chunk
+            if self.maxlen < audio.size(0):
+                last_t = audio.size(0) - self.maxlen
+                beg_i = random.choice(list(range(last_t)))
+                print('Selecting chunk of len {} at {}'.format(self.maxlen,
+                                                               beg_i))
+                audio = audio[beg_i:beg_i + self.maxlen]
 
         if self.transform is not None:
             audio = self.transform(audio)
@@ -265,7 +277,7 @@ class VCTK(data.Dataset):
                     ids = [split_re.split(l)[0] for i, l in \
                            enumerate(spk_inf_f.readlines()) if i > 0]
                     # include speaker p280 for it is not in info file
-                    ids.append('p280')
+                    ids.append('280')
                     self.num_ids = len(ids) 
                     print('Number of speakers found: ', self.num_ids)
                     self.spk2idx = dict((k, i) for i, k in enumerate(ids))
