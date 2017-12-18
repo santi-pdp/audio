@@ -5,6 +5,11 @@ try:
     import librosa
 except ImportError:
     librosa = None
+try:
+    import pysptk
+except ImportError:
+    pysptk = None
+
 
 class Compose(object):
     """Composes several transforms together.
@@ -252,3 +257,66 @@ class MuLawExpanding(object):
             x = ((x_mu) / mu) * 2 - 1.
             x = torch.sign(x) * (torch.exp(torch.abs(x) * torch.log1p(mu)) - 1.) / mu
         return x
+
+class MultiAcoFeats(object):
+    """ Extract acoustic features and compose all outputs,
+    with wavs, into a list of tensors
+    """
+
+    def __init__(self, sr=16000, n_fft=1024, hop_length=80,
+                 win_length=320, window='hann'):
+        self.sr = sr
+        self.n_fft = n_fft
+        self.hop_length = hop_length
+        self.win_length = win_length
+        self.window = window
+        self.mel = MEL(sr=sr, n_fft=n_fft, hop_length=hop_length)
+
+    def __call__(self, tensor):
+        """
+
+        Args:
+            tensor (Tensor): Tensor of audio of size (samples x 1)
+
+        """
+        t_npy = tensor.cpu().squeeze(1).numpy()
+        # MelSpectrum and MFCCs
+        mel = self.mel(tensor).transpose(0, 1).squeeze(2)
+        ret = {'mel_spec':mel}
+        mfcc = librosa.feature.mfcc(y=t_npy, sr=self.sr,
+                                    n_fft=self.n_fft,
+                                    hop_length=self.hop_length)
+        ret['mfcc'] = torch.FloatTensor(mfcc.T)
+        # Spectrogram abs magnitude [dB]
+        spec = librosa.stft(t_npy, n_fft=self.n_fft,
+                            hop_length=self.hop_length,
+                            win_length=self.win_length,
+                            window=self.window)
+        spec_db = librosa.amplitude_to_db(spec)
+        ret['spec'] = torch.FloatTensor(spec_db.T)
+        # ZCR, E and lF0
+        if pysptk is None:
+            print("pysptk not installed, cannot compute F0")
+            return tensor
+        else:
+            from ahoproc_tools.interpolate import interpolation
+            f0 = pysptk.swipe(t_npy.astype(np.float64), fs=self.sr,
+                              hopsize=self.hop_length, min=60, max=240,
+                              otype="f0")
+            lf0 = np.log(f0 + 1e-10)
+            lf0, uv = interpolation(lf0, -1)
+            ret['lf0'] = torch.FloatTensor(lf0).view(-1, 1)
+            ret['uv'] = torch.FloatTensor(uv.astype(np.float32)).view(-1, 1)
+        egy = librosa.feature.rmse(y=t_npy, frame_length=self.win_length,
+                                   hop_length=self.hop_length,
+                                   pad_mode='constant')
+        zcr = librosa.feature.zero_crossing_rate(y=t_npy,
+                                                 frame_length=self.win_length,
+                                                 hop_length=self.hop_length)
+        ret['egy'] = torch.FloatTensor(egy).view(-1, 1)
+        ret['zcr'] = torch.FloatTensor(zcr).view(-1, 1)
+        ret['wav'] = tensor.view((-1, 1))
+        return ret
+
+
+

@@ -80,6 +80,8 @@ class VCTK(data.Dataset):
             target and transforms it.
         dev_mode(bool, optional): if true, clean up is not performed on downloaded
             files.  Useful to keep raw audio and transcriptions.
+        aco_features(bool, optional): if true, compute and load acoustic
+            features based on spectrogram, Aho-mfcc, Aho-lf0, u/v flag, E and ZCR.
     """
     raw_folder = 'vctk/raw'
     processed_folder = 'vctk/processed'
@@ -87,12 +89,14 @@ class VCTK(data.Dataset):
     dset_path = 'VCTK-Corpus'
 
     def __init__(self, root, downsample=True, transform=None,
-                 target_transform=None, download=False, dev_mode=False):
+                 target_transform=None, download=False, dev_mode=False,
+                 aco_features=False):
         self.root = os.path.expanduser(root)
         self.downsample = downsample
         self.transform = transform
         self.target_transform = target_transform
         self.dev_mode = dev_mode
+        self.aco_features = aco_features
         self.data = []
         self.labels = []
         self.chunk_size = 1000
