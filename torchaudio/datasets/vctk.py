@@ -6,6 +6,8 @@ import shutil
 import errno
 import torch
 import torchaudio
+import pickle
+import re
 
 AUDIO_EXTENSIONS = [
     '.wav', '.mp3', '.flac', '.sph', '.ogg', '.opus',
@@ -144,16 +146,25 @@ class VCTK(data.Dataset):
 
     def _write_info(self, num_items):
         info_path = os.path.join(self.root, self.processed_folder, "vctk_info.txt")
+        spk2idx_path = os.path.join(self.root, self.processed_folder,
+                                    "spk2idx.pkl")
         with open(info_path, "w") as f:
             f.write("num_samples,{}\n".format(num_items))
             f.write("max_len,{}\n".format(self.max_len))
             f.write("num_ids,{}\n".format(self.num_ids))
+        with open(spk2idx_path, "wb") as f:
+            pickle.dump(self.spk2idx, f)
 
     def _read_info(self):
         info_path = os.path.join(self.root, self.processed_folder, "vctk_info.txt")
+        spk2idx_path = os.path.join(self.root, self.processed_folder,
+                                    "spk2idx.pkl")
         with open(info_path, "r") as f:
             self.num_samples = int(f.readline().split(",")[1])
             self.max_len = int(f.readline().split(",")[1])
+            self.num_ids = int(f.readline().split(",")[1])
+        with open(spk2idx_path, "rb") as f:
+            self.spk2idx = pickle.load(f)
 
     def download(self):
         """Download the VCTK data if it doesn't exist in processed_folder already."""
@@ -202,8 +213,12 @@ class VCTK(data.Dataset):
         # get num of spk ids
         with open(os.path.join(dset_abs_path,
                                'speaker-info.txt'), 'r') as spk_inf_f:
-            self.num_ids = len(spk_inf_f.readlines())
+            split_re = re.compile('\s+')
+            ids = [split_re.split(l)[0] for i, l in \
+                   enumerate(spk_inf_f.readlines()) if i > 0]
+            self.num_ids = len(ids) 
             print('Number of speakers found: ', self.num_ids)
+            self.spk2idx = dict((k, i) for i, k in enumerate(ids))
         audios = make_manifest(dset_abs_path)
         utterences = load_txts(dset_abs_path)
         self.max_len = 0
