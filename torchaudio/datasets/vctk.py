@@ -140,6 +140,10 @@ class VCTK(data.Dataset):
         if self.target_transform is not None:
             target = self.target_transform(target)
 
+        if spk_id[0] == 'p':
+            # remove prefix to match spk ids in speaker-info.txt
+            spk_id = spk_id[1:]
+
         return audio, target, spk_id
 
     def __len__(self):
