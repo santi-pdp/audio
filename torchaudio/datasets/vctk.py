@@ -8,6 +8,8 @@ import torch
 import torchaudio
 import pickle
 import re
+import random
+import numpy as np
 
 AUDIO_EXTENSIONS = [
     '.wav', '.mp3', '.flac', '.sph', '.ogg', '.opus',
@@ -80,29 +82,30 @@ class VCTK(data.Dataset):
             target and transforms it.
         dev_mode(bool, optional): if true, clean up is not performed on downloaded
             files.  Useful to keep raw audio and transcriptions.
-        aco_features(bool, optional): if true, compute and load acoustic
-            features based on spectrogram, Aho-mfcc, Aho-lf0, u/v flag, E and ZCR.
     """
     raw_folder = 'vctk/raw'
     processed_folder = 'vctk/processed'
     url = 'http://homepages.inf.ed.ac.uk/jyamagis/release/VCTK-Corpus.tar.gz'
     dset_path = 'VCTK-Corpus'
+    train_size = 0.8
+    valid_size = 0.1
+    test_size = 0.1
 
     def __init__(self, root, downsample=True, transform=None,
                  target_transform=None, download=False, dev_mode=False,
-                 aco_features=False):
+                 split='train'):
         self.root = os.path.expanduser(root)
         self.downsample = downsample
         self.transform = transform
         self.target_transform = target_transform
         self.dev_mode = dev_mode
-        self.aco_features = aco_features
         self.data = []
         self.labels = []
         self.chunk_size = 1000
         self.num_samples = 0
         self.max_len = 0
         self.cached_pt = 0
+        self.split = split
 
         if download:
             self.download()
@@ -110,9 +113,10 @@ class VCTK(data.Dataset):
         if not self._check_exists():
             raise RuntimeError('Dataset not found.' +
                                ' You can use download=True to download it')
-        self._read_info()
+        self._read_info(split)
         self.data, self.labels, self.spk_ids = torch.load(os.path.join(self.root, 
                                                                        self.processed_folder, 
+                                                                       split,
                                                                        "vctk_{:04d}.pt".format(self.cached_pt)))
 
     def __getitem__(self, index):
@@ -128,6 +132,7 @@ class VCTK(data.Dataset):
             self.data, self.labels, \
             self.spk_ids = torch.load(os.path.join(self.root, 
                                                    self.processed_folder, 
+                                                   self.split,
                                                    "vctk_{:04d}.pt".format(self.cached_pt)))
         index = index % self.chunk_size
         audio = self.data[index]
@@ -150,11 +155,13 @@ class VCTK(data.Dataset):
         return self.num_samples
 
     def _check_exists(self):
-        return os.path.exists(os.path.join(self.root, self.processed_folder, "vctk_info.txt"))
+        return os.path.exists(os.path.join(self.root, self.processed_folder,
+                                           'train', "vctk_info.txt"))
 
-    def _write_info(self, num_items):
-        info_path = os.path.join(self.root, self.processed_folder, "vctk_info.txt")
-        spk2idx_path = os.path.join(self.root, self.processed_folder,
+    def _write_info(self, num_items, split):
+        info_path = os.path.join(self.root, self.processed_folder, split,
+                                 "vctk_info.txt")
+        spk2idx_path = os.path.join(self.root, self.processed_folder, split,
                                     "spk2idx.pkl")
         with open(info_path, "w") as f:
             f.write("num_samples,{}\n".format(num_items))
@@ -163,9 +170,11 @@ class VCTK(data.Dataset):
         with open(spk2idx_path, "wb") as f:
             pickle.dump(self.spk2idx, f)
 
-    def _read_info(self):
-        info_path = os.path.join(self.root, self.processed_folder, "vctk_info.txt")
+    def _read_info(self, split):
+        info_path = os.path.join(self.root, self.processed_folder, split,
+                                 "vctk_info.txt")
         spk2idx_path = os.path.join(self.root, self.processed_folder,
+                                    split,
                                     "spk2idx.pkl")
         with open(info_path, "r") as f:
             self.num_samples = int(f.readline().split(",")[1])
@@ -183,13 +192,22 @@ class VCTK(data.Dataset):
             return
 
         raw_abs_dir = os.path.join(self.root, self.raw_folder)
-        processed_abs_dir = os.path.join(self.root, self.processed_folder)
+        splits = ['train', 'valid', 'test']
+        processed_abs_dirs = [os.path.join(self.root, self.processed_folder, \
+                                           split) for split in splits]
         dset_abs_path = os.path.join(self.root, self.raw_folder, self.dset_path)
 
         # download files
         try:
             os.makedirs(os.path.join(self.root, self.raw_folder))
-            os.makedirs(os.path.join(self.root, self.processed_folder))
+        except OSError as e:
+            if e.errno == errno.EEXIST:
+                pass
+            else:
+                raise
+        try:
+            for processed_abs_dir in processed_abs_dirs:
+                os.makedirs(processed_abs_dir)
         except OSError as e:
             if e.errno == errno.EEXIST:
                 pass
@@ -212,59 +230,80 @@ class VCTK(data.Dataset):
         if not self.dev_mode:
             os.unlink(file_path)
 
-        # process and save as torch files
-        print('Processing...')
-        shutil.copyfile(
-            os.path.join(dset_abs_path, "COPYING"),
-            os.path.join(processed_abs_dir, "VCTK_COPYING")
-        )
-        # get num of spk ids
-        with open(os.path.join(dset_abs_path,
-                               'speaker-info.txt'), 'r') as spk_inf_f:
-            split_re = re.compile('\s+')
-            ids = [split_re.split(l)[0] for i, l in \
-                   enumerate(spk_inf_f.readlines()) if i > 0]
-            self.num_ids = len(ids) 
-            print('Number of speakers found: ', self.num_ids)
-            self.spk2idx = dict((k, i) for i, k in enumerate(ids))
         audios = make_manifest(dset_abs_path)
         utterences = load_txts(dset_abs_path)
+        print("Found {} audio files and {} utterences".format(len(audios), 
+                                                              len(utterences)))
         self.max_len = 0
-        print("Found {} audio files and {} utterences".format(len(audios), len(utterences)))
-        for n in range(len(audios) // self.chunk_size + 1):
-            tensors = []
-            labels = []
-            lengths = []
-            spk_ids = []
-            st_idx = n * self.chunk_size
-            end_idx = st_idx + self.chunk_size
-            for i, f in enumerate(audios[st_idx:end_idx]):
-                txt_dir = os.path.dirname(f['audio']).replace("wav48", "txt")
-                if os.path.exists(txt_dir):
-                    f_rel_no_ext = os.path.basename(f['audio']).rsplit(".", 1)[0]
-                    sig = read_audio(f['audio'], downsample=self.downsample)[0]
-                    tensors.append(sig)
-                    lengths.append(sig.size(0))
-                    labels.append(utterences[f_rel_no_ext])
-                    spk_ids.append(f['spk_id'])
-                    self.max_len = sig.size(0) if sig.size(0) > self.max_len else self.max_len
-            # sort sigs/labels: longest -> shortest
-            tensors, labels, \
-            spk_ids = zip(*[(b, c, d) for (a,b,c, d) in sorted(zip(lengths,
-                                                                   tensors,
-                                                                   labels,
-                                                                   spk_ids), key=lambda x: x[0], reverse=True)])
-            data = (tensors, labels, spk_ids)
-            torch.save(
-                data,
-                os.path.join(
-                    self.root,
-                    self.processed_folder,
-                    "vctk_{:04d}.pt".format(n)
-                )
+        # prepare splits indexes
+        random.shuffle(list(range(len(audios))))
+        N_train = int(np.ceil(len(audios) * self.train_size))
+        N_test = int(np.floor(len(audios) * self.test_size))
+        N_valid = int(np.ceil(len(audios) * self.valid_size))
+        print('Train size: {}'.format(N_train))
+        print('Test size: {}'.format(N_test))
+        print('Valid size: {}'.format(N_valid))
+        assert N_train + N_test + N_valid == len(audios)
+        split_idxes = [audios[:N_train], 
+                       audios[N_train:N_train + N_valid],
+                       audios[-N_test:]]
+        for split, idxes, processed_abs_dir in zip(splits, split_idxes, 
+                                                   processed_abs_dirs):
+            # process and save as torch files
+            print('Processing {}...'.format(split))
+            shutil.copyfile(
+                os.path.join(dset_abs_path, "COPYING"),
+                os.path.join(processed_abs_dir, "VCTK_COPYING")
             )
-        self._write_info((n*self.chunk_size)+i+1)
-        if not self.dev_mode:
-            shutil.rmtree(raw_abs_dir, ignore_errors=True)
+            if split == 'train':
+                # Build the statistics out of training set
+                # get num of spk ids
+                with open(os.path.join(dset_abs_path,
+                                       'speaker-info.txt'), 'r') as spk_inf_f:
+                    split_re = re.compile('\s+')
+                    # skip line 0 for it is the header
+                    ids = [split_re.split(l)[0] for i, l in \
+                           enumerate(spk_inf_f.readlines()) if i > 0]
+                    # include speaker p280 for it is not in info file
+                    ids.append('p280')
+                    self.num_ids = len(ids) 
+                    print('Number of speakers found: ', self.num_ids)
+                    self.spk2idx = dict((k, i) for i, k in enumerate(ids))
+            for n in range(len(idxes) // self.chunk_size + 1):
+                tensors = []
+                labels = []
+                lengths = []
+                spk_ids = []
+                st_idx = n * self.chunk_size
+                end_idx = st_idx + self.chunk_size
+                for i, f in enumerate(idxes[st_idx:end_idx]):
+                    txt_dir = os.path.dirname(f['audio']).replace("wav48", "txt")
+                    if os.path.exists(txt_dir):
+                        f_rel_no_ext = os.path.basename(f['audio']).rsplit(".", 1)[0]
+                        sig = read_audio(f['audio'], downsample=self.downsample)[0]
+                        tensors.append(sig)
+                        lengths.append(sig.size(0))
+                        labels.append(utterences[f_rel_no_ext])
+                        spk_ids.append(f['spk_id'])
+                        self.max_len = sig.size(0) if sig.size(0) > self.max_len else self.max_len
+                # sort sigs/labels: longest -> shortest
+                tensors, labels, \
+                spk_ids = zip(*[(b, c, d) for (a,b,c, d) in sorted(zip(lengths,
+                                                                       tensors,
+                                                                       labels,
+                                                                       spk_ids), key=lambda x: x[0], reverse=True)])
+                data = (tensors, labels, spk_ids)
+                torch.save(
+                    data,
+                    os.path.join(
+                        self.root,
+                        self.processed_folder,
+                        split,
+                        "vctk_{:04d}.pt".format(n)
+                    )
+                )
+            self._write_info((n*self.chunk_size)+i+1, split)
+            if not self.dev_mode:
+                shutil.rmtree(raw_abs_dir, ignore_errors=True)
 
-        print('Done!')
+            print('Done!')
