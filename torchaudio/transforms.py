@@ -367,7 +367,7 @@ class Additive(object):
         sel_noise = self.noises[np.asscalar(noise_idx)]
         noise = sel_noise['data']
         snr = np.random.choice(self.snr_levels, 1)
-        print('Applying SNR: {} dB'.format(snr[0]))
+        # print('Applying SNR: {} dB'.format(snr[0]))
         noisy, noise_bound = self.addnoise_asl(wav, noise, srate, 
                                                nbits, snr, 
                                                do_IRS=self.do_IRS)
