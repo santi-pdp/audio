@@ -130,14 +130,19 @@ class VCTK(data.Dataset):
         Returns:
             tuple: (audio, target, spk_id) where target is a utterance
         """
+        #print('cached_pt: ', self.cached_pt)
+        #print('chunk_size: ', self.chunk_size)
+        #print('index: ', index)
         if self.cached_pt != index // self.chunk_size:
             self.cached_pt = int(index // self.chunk_size)
+            #print('re-loading cached_pt: ', self.cached_pt)
             self.data, self.labels, \
             self.spk_ids = torch.load(os.path.join(self.root, 
                                                    self.processed_folder, 
                                                    self.split,
                                                    "vctk_{:04d}.pt".format(self.cached_pt)))
         index = index % self.chunk_size
+        #print('data len: ', len(self.data))
         audio = self.data[index]
         target = self.labels[index]
         spk_id = self.spk_ids[index]
@@ -314,7 +319,8 @@ class VCTK(data.Dataset):
                         "vctk_{:04d}.pt".format(n)
                     )
                 )
-            self._write_info((n*self.chunk_size)+i+1, split)
+            #self._write_info((n*self.chunk_size)+i+1, split)
+            self._write_info(len(idxes), split)
             if not self.dev_mode:
                 shutil.rmtree(raw_abs_dir, ignore_errors=True)
 
