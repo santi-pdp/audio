@@ -147,8 +147,8 @@ class VCTK(data.Dataset):
             if self.maxlen < audio.size(0):
                 last_t = audio.size(0) - self.maxlen
                 beg_i = random.choice(list(range(last_t)))
-                print('Selecting chunk of len {} at {}'.format(self.maxlen,
-                                                               beg_i))
+                #print('Selecting chunk of len {} at {}'.format(self.maxlen,
+                #                                               beg_i))
                 audio = audio[beg_i:beg_i + self.maxlen]
 
         if self.transform is not None:
