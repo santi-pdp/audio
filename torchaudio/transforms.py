@@ -267,13 +267,17 @@ class MultiAcoFeats(object):
 
     def __init__(self, sr=16000, n_fft=1024, hop_length=80,
                  win_length=320, window='hann', noise_dir=None, 
-                 snr_levels=[0, 5, 10, 15]):
+                 snr_levels=[0, 5, 10], n_mels=128, 
+                 mfcc_order=20):
         self.sr = sr
         self.n_fft = n_fft
         self.hop_length = hop_length
         self.win_length = win_length
         self.window = window
-        self.mel = MEL(sr=sr, n_fft=n_fft, hop_length=hop_length)
+        self.mfcc_order = mfcc_order
+        self.n_mels = n_mels
+        self.mel = MEL(sr=sr, n_fft=n_fft, hop_length=hop_length,
+                       n_mels=n_mels)
         self.additive = Additive(noises_dir=noise_dir,
                                  snr_levels=snr_levels)
         self.clipping = Clipping()
@@ -298,6 +302,11 @@ class MultiAcoFeats(object):
                           otype="f0")
         lf0 = np.log(f0 + 1e-10)
         lf0, uv = interpolation(lf0, -1)
+        if np.any(lf0 == np.log(1e-10)):
+            # all lf0 goes to minf0 as a PAD symbol
+            lf0 = np.ones(lf0.shape) * np.log(60)
+            # all frames are unvoiced
+            uv = np.zeros(uv.shape)
         ret = {'lf0':torch.FloatTensor(lf0).view(-1, 1),
                'uv':torch.FloatTensor(uv.astype(np.float32)).view(-1, 1)}
         tot_frames = f0.shape[0]
@@ -307,7 +316,8 @@ class MultiAcoFeats(object):
         ret['mel_spec'] = mel[:tot_frames]
         mfcc = librosa.feature.mfcc(y=t_npy, sr=self.sr,
                                     n_fft=self.n_fft,
-                                    hop_length=self.hop_length).T
+                                    hop_length=self.hop_length,
+                                    n_mfcc=self.mfcc_order).T
         mfcc = mfcc[:tot_frames]
         ret['mfcc'] = torch.FloatTensor(mfcc)
         # Spectrogram abs magnitude [dB]
@@ -358,7 +368,7 @@ class MultiAcoFeats(object):
 
 class Additive(object):
 
-    def __init__(self, noises_dir, snr_levels=[0, 5, 10, 15], do_IRS=False):
+    def __init__(self, noises_dir, snr_levels=[0, 5, 10], do_IRS=False):
         self.noises_dir = noises_dir
         self.snr_levels = snr_levels
         self.do_IRS = do_IRS
@@ -705,3 +715,31 @@ class Chopper(object):
         chopped = self.chop_wav(wav, srate, speech_regions).astype(np.float32)
         return torch.FloatTensor(chopped)
 
+
+class ZNorm(object):
+
+    def __init__(self, stats):
+        assert isinstance(stats, dict), type(stats)
+        self.stats = stats
+
+    def __call__(self, data):
+        assert isinstance(data, dict), type(data)
+        for k, v in self.stats.items():
+            mean = v['mean']
+            std = v['std']
+            data[k] = (data[k] - mean) / std
+        return data
+
+class MinMaxNorm(object):
+
+    def __init__(self, stats):
+        assert isinstance(stats, dict), type(stats)
+        self.stats = stats
+
+    def __call__(self, data):
+        assert isinstance(data, dict), type(data)
+        for k, v in self.stats.items():
+            min_ = v['min']
+            max_ = v['max']
+            data[k] = (data[k] - min_) / (max_ - min_)
+        return data
