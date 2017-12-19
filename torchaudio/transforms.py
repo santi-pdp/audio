@@ -4,6 +4,7 @@ import numpy as np
 import glob
 import os
 import random
+import struct
 from scipy.signal import lfilter
 from scipy.interpolate import interp1d
 try:
@@ -276,6 +277,9 @@ class MultiAcoFeats(object):
         self.additive = Additive(noises_dir=noise_dir,
                                  snr_levels=snr_levels)
         self.clipping = Clipping()
+        self.chopper = Chopper()
+        self.denormalizer = Scale(1. / ((2 ** 15) - 1))
+        self.normalizer = Scale((2 ** 15) - 1)
 
     def __call__(self, tensor):
         """
@@ -328,14 +332,25 @@ class MultiAcoFeats(object):
         zcr = zcr[:tot_frames]
         ret['egy'] = torch.FloatTensor(egy)
         ret['zcr'] = torch.FloatTensor(zcr)
+        ntensor = tensor.clone()
+        if hasattr(self, 'chopper'):
+            do_chop = random.random() > 0.5
+            if do_chop:
+                # unorm to 16-bit scale for VAD in chopper
+                scaled_t = self.denormalizer(ntensor).numpy()
+                ntensor = self.chopper(scaled_t, self.sr)
+                ntensor = self.normalizer(ntensor)
+
         if hasattr(self, 'additive'):
             do_add = random.random() > 0.5
             if do_add:
-                tensor = self.additive(t_npy, self.sr)
+                ntensor = self.additive(ntensor.numpy(), self.sr)
+
         if hasattr(self, 'clipping'):
             do_clip = random.random() > 0.5
             if do_clip:
-                tensor = self.clipping(tensor.numpy())
+                ntensor = self.clipping(ntensor.numpy())
+        ret['nwav'] = ntensor.view((-1, 1))
         ret['wav'] = tensor.view((-1, 1))
         return ret
 
@@ -372,6 +387,8 @@ class Additive(object):
         noise = sel_noise['data']
         snr = np.random.choice(self.snr_levels, 1)
         # print('Applying SNR: {} dB'.format(snr[0]))
+        if wav.ndim > 1:
+            wav = wav.reshape((-1,))
         noisy, noise_bound = self.addnoise_asl(wav, noise, srate, 
                                                nbits, snr, 
                                                do_IRS=self.do_IRS)
@@ -596,3 +613,95 @@ class Clipping(object):
         clip = np.maximum(wav, cf * np.min(wav))
         clip = np.minimum(wav, cf * np.max(wav))
         return torch.FloatTensor(clip)
+
+class Chopper(object):
+    def __init__(self, chop_factors=[(0.05, 0.025), (0.1, 0.05)],
+                 max_chops=2):
+        # chop factors in seconds (mean, std) per possible chop
+        import webrtcvad
+        self.chop_factors = chop_factors
+        self.max_chops = max_chops
+        # create VAD to get speech chunks
+        self.vad = webrtcvad.Vad(2)
+
+    def vad_wav(self, wav, srate):
+        """ Detect the voice activity in the 16-bit mono PCM wav and return
+            a list of tuples: (speech_region_i_beg_sample, center_sample, 
+            region_duration)
+        """
+        if srate != 16000:
+            raise ValueError('Sample rate must be 16kHz')
+        window_size = 160 # samples
+        regions = []
+        curr_region_counter = 0
+        init = None
+        vad = self.vad
+        # first run the vad across the full waveform
+        for beg_i in range(0, wav.shape[0], window_size):
+            frame = wav[beg_i:beg_i + window_size]
+            if frame.shape[0] >= window_size and \
+               vad.is_speech(struct.pack('{}i'.format(window_size), 
+                                         *frame), srate):
+                curr_region_counter += 1
+                if init is None:
+                    init = beg_i
+            else:
+                # end of speech region (or never began yet)
+                if init is not None:
+                    # close the region
+                    end_sample = init + (curr_region_counter * window_size)
+                    center_sample = init + (end_sample - init) / 2
+                    regions.append((init, center_sample, 
+                                    curr_region_counter * window_size))
+                init = None
+                curr_region_counter = 0
+        return regions
+
+    def chop_wav(self, wav, srate, speech_regions):
+        if len(speech_regions) == 0:
+            #print('Skipping no speech regions')
+            return wav
+        chop_factors = self.chop_factors
+        # get num of chops to make
+        num_chops = list(range(1, self.max_chops + 1))
+        chops = np.asscalar(np.random.choice(num_chops, 1))
+        # trim it to available regions
+        chops = min(chops, len(speech_regions))
+        # build random indexes to randomly pick regions, not ordered
+        if chops == 1:
+            chop_idxs = [0]
+        else:
+            chop_idxs = np.random.choice(list(range(chops)), chops, 
+                                         replace=False)
+        chopped_wav = np.copy(wav)
+        # make a chop per chosen region
+        for chop_i in chop_idxs:
+            region = speech_regions[chop_i]
+            # decompose the region
+            reg_beg, reg_center, reg_dur = region
+            # pick random chop_factor
+            chop_factor_idx = np.random.choice(range(len(chop_factors)), 1)[0]
+            chop_factor = chop_factors[chop_factor_idx]
+            # compute duration from: std * N(0, 1) + mean
+            mean, std = chop_factor
+            chop_dur = mean + np.random.randn(1) * std
+            # convert dur to samples
+            chop_s_dur = int(chop_dur * srate)
+            chop_beg = max(int(reg_center - (chop_s_dur / 2)), reg_beg)
+            chop_end = min(int(reg_center + (chop_s_dur / 2)), reg_beg +
+                           reg_dur)
+            #print('chop_beg: ', chop_beg)
+            #print('chop_end: ', chop_end)
+            # chop the selected region with computed dur
+            chopped_wav[chop_beg:chop_end] = 0
+        return chopped_wav
+
+    def __call__(self, wav, srate):
+        wav = wav.astype(np.int16)
+        if wav.ndim > 1:
+            wav = wav.reshape((-1,))
+        # get speech regions for proper chopping
+        speech_regions = self.vad_wav(wav, srate)
+        chopped = self.chop_wav(wav, srate, speech_regions).astype(np.float32)
+        return torch.FloatTensor(chopped)
+
