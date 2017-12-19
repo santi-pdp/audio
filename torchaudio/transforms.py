@@ -3,6 +3,7 @@ import torch
 import numpy as np
 import glob
 import os
+import random
 from scipy.signal import lfilter
 from scipy.interpolate import interp1d
 try:
@@ -274,6 +275,7 @@ class MultiAcoFeats(object):
         self.mel = MEL(sr=sr, n_fft=n_fft, hop_length=hop_length)
         self.additive = Additive(noises_dir=noise_dir,
                                  snr_levels=snr_levels)
+        self.clipping = Clipping()
 
     def __call__(self, tensor):
         """
@@ -326,12 +328,14 @@ class MultiAcoFeats(object):
         zcr = zcr[:tot_frames]
         ret['egy'] = torch.FloatTensor(egy)
         ret['zcr'] = torch.FloatTensor(zcr)
-        tensor = self.additive(t_npy, self.sr)
         if hasattr(self, 'additive'):
-            #do_add = random.random() > 0.5
-            #if do_add:
-            if True:
+            do_add = random.random() > 0.5
+            if do_add:
                 tensor = self.additive(t_npy, self.sr)
+        if hasattr(self, 'clipping'):
+            do_clip = random.random() > 0.5
+            if do_clip:
+                tensor = self.clipping(tensor.numpy())
         ret['wav'] = tensor.view((-1, 1))
         return ret
 
@@ -580,3 +584,15 @@ class Additive(object):
         asl_ms_log = midcount
         cc = midthr
         return asl_ms_log, cc
+
+
+class Clipping(object):
+
+    def __init__(self, clip_factors = [0.3, 0.4, 0.5]):
+        self.clip_factors = clip_factors
+
+    def __call__(self, wav):
+        cf = np.random.choice(self.clip_factors, 1)
+        clip = np.maximum(wav, cf * np.min(wav))
+        clip = np.minimum(wav, cf * np.max(wav))
+        return torch.FloatTensor(clip)
