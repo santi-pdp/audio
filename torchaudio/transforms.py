@@ -268,7 +268,7 @@ class MultiAcoFeats(object):
     def __init__(self, sr=16000, n_fft=1024, hop_length=80,
                  win_length=320, window='hann', noise_dir=None, 
                  snr_levels=[0, 5, 10], n_mels=128, 
-                 mfcc_order=20):
+                 mfcc_order=20, augmentation=True):
         self.sr = sr
         self.n_fft = n_fft
         self.hop_length = hop_length
@@ -278,12 +278,13 @@ class MultiAcoFeats(object):
         self.n_mels = n_mels
         self.mel = MEL(sr=sr, n_fft=n_fft, hop_length=hop_length,
                        n_mels=n_mels)
-        self.additive = Additive(noises_dir=noise_dir,
-                                 snr_levels=snr_levels)
-        self.clipping = Clipping()
-        self.chopper = Chopper()
-        self.denormalizer = Scale(1. / ((2 ** 15) - 1))
-        self.normalizer = Scale((2 ** 15) - 1)
+        if augmentation:
+            self.additive = Additive(noises_dir=noise_dir,
+                                     snr_levels=snr_levels)
+            self.clipping = Clipping()
+            self.chopper = Chopper()
+            self.denormalizer = Scale(1. / ((2 ** 15) - 1))
+            self.normalizer = Scale((2 ** 15) - 1)
 
     def __call__(self, tensor):
         """
@@ -296,10 +297,12 @@ class MultiAcoFeats(object):
         import pysptk
         from ahoproc_tools.interpolate import interpolation
         t_npy = tensor.cpu().squeeze(1).numpy()
+        seqlen = t_npy.shape[0]
+        T = seqlen // self.hop_length
         # compute LF0 and UV
         f0 = pysptk.swipe(t_npy.astype(np.float64), fs=self.sr,
                           hopsize=self.hop_length, min=60, max=240,
-                          otype="f0")
+                          otype="f0")[:T]
         lf0 = np.log(f0 + 1e-10)
         lf0, uv = interpolation(lf0, -1)
         if np.any(lf0 == np.log(1e-10)):
@@ -309,7 +312,7 @@ class MultiAcoFeats(object):
             uv = np.zeros(uv.shape)
         ret = {'lf0':torch.FloatTensor(lf0).view(-1, 1),
                'uv':torch.FloatTensor(uv.astype(np.float32)).view(-1, 1)}
-        tot_frames = f0.shape[0]
+        tot_frames = T
         # --- All librosa processes will be trimmed to same frames as in pysptk
         # MelSpectrum and MFCCs
         mel = self.mel(tensor).transpose(0, 1).squeeze(2)
