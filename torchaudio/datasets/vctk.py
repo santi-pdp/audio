@@ -286,6 +286,7 @@ class VCTK(data.Dataset):
                     self.num_ids = len(ids) 
                     print('Number of speakers found: ', self.num_ids)
                     self.spk2idx = dict((k, i) for i, k in enumerate(ids))
+            files_log = ''
             for n in range(len(idxes) // self.chunk_size + 1):
                 tensors = []
                 labels = []
@@ -297,6 +298,7 @@ class VCTK(data.Dataset):
                     txt_dir = os.path.dirname(f['audio']).replace("wav48", "txt")
                     if os.path.exists(txt_dir):
                         f_rel_no_ext = os.path.basename(f['audio']).rsplit(".", 1)[0]
+                        files_log += '{}\n'.format(f['audio'])
                         sig = read_audio(f['audio'], downsample=self.downsample)[0]
                         tensors.append(sig)
                         lengths.append(sig.size(0))
@@ -319,6 +321,11 @@ class VCTK(data.Dataset):
                         "vctk_{:04d}.pt".format(n)
                     )
                 )
+            with open(os.path.join(self.root,
+                                   self.processed_folder,
+                                   split, '{}_wavs.guia'.format(split)),
+                      'w') as guia_f:
+                guia_f.write(files_log)
             #self._write_info((n*self.chunk_size)+i+1, split)
             self._write_info(len(idxes), split)
             if not self.dev_mode:
