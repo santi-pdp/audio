@@ -143,6 +143,7 @@ class VCTK(data.Dataset):
                                                    "vctk_{:04d}.pt".format(self.cached_pt)))
         index = index % self.chunk_size
         #print('data len: ', len(self.data))
+        #print('index: ', index)
         audio = self.data[index]
         target = self.labels[index]
         spk_id = self.spk_ids[index]
@@ -287,6 +288,74 @@ class VCTK(data.Dataset):
                     print('Number of speakers found: ', self.num_ids)
                     self.spk2idx = dict((k, i) for i, k in enumerate(ids))
             files_log = ''
+            chunk_n = 0
+            curr_chunk = 0
+            total_files = 0
+            tensors = []
+            labels = []
+            lengths = []
+            spk_ids = []
+            for i, f in enumerate(idxes):
+                txt_dir = os.path.dirname(f['audio']).replace("wav48", "txt")
+                files_log += '{}\n'.format(f['audio'])
+                if os.path.exists(txt_dir):
+                    f_rel_no_ext = os.path.basename(f['audio']).rsplit(".", 1)[0]
+                    sig = read_audio(f['audio'], downsample=self.downsample)[0]
+                    tensors.append(sig)
+                    lengths.append(sig.size(0))
+                    labels.append(utterences[f_rel_no_ext])
+                    spk_ids.append(f['spk_id'])
+                    self.max_len = sig.size(0) if sig.size(0) > self.max_len else self.max_len
+                    chunk_n += 1
+                    total_files += 1
+                    if chunk_n  % self.chunk_size == 0:
+                        # closed a chunk, reset chunk_n
+                        # sort sigs/spkid/labels: longest -> shortest
+                        tensors, labels,\
+                        spk_ids = zip(*[(b, c, d) for (a, b, c, d) in \
+                                        sorted(zip(lengths, tensors, labels,
+                                                   spk_ids),
+                                               key=lambda x: x[0], reverse=True)])
+                        data = (tensors, labels, spk_ids)
+                        torch.save(
+                            data,
+                            os.path.join(self.root,
+                                         self.processed_folder,
+                                         split,
+                                         'vctk_{:04d}.pt'.format(curr_chunk)
+                                        )
+                        )
+                        curr_chunk += 1
+                        chunk_n = 0
+                        tensors = []
+                        labels = []
+                        lengths = []
+                        spk_ids = []
+            if chunk_n > 0:
+                # something still in buffer for last chunk
+                tensors, labels,\
+                spk_ids = zip(*[(b, c, d) for (a, b, c, d) in \
+                                sorted(zip(lengths, tensors, labels,
+                                           spk_ids),
+                                       key=lambda x: x[0], reverse=True)])
+                data = (tensors, labels, spk_ids)
+                torch.save(
+                    data,
+                    os.path.join(self.root,
+                                 self.processed_folder,
+                                 split,
+                                 'vctk_{:04d}.pt'.format(curr_chunk)
+                                )
+                )
+                curr_chunk += 1
+
+            with open(os.path.join(self.root,
+                                   self.processed_folder,
+                                   split, '{}_wavs.guia'.format(split)),
+                      'w') as guia_f:
+                guia_f.write(files_log)
+            self._write_info(total_files, split)
+            """
             for n in range(len(idxes) // self.chunk_size + 1):
                 tensors = []
                 labels = []
@@ -296,11 +365,12 @@ class VCTK(data.Dataset):
                 end_idx = st_idx + self.chunk_size
                 for i, f in enumerate(idxes[st_idx:end_idx]):
                     txt_dir = os.path.dirname(f['audio']).replace("wav48", "txt")
+                    files_log += '{}\n'.format(f['audio'])
                     if os.path.exists(txt_dir):
                         f_rel_no_ext = os.path.basename(f['audio']).rsplit(".", 1)[0]
-                        files_log += '{}\n'.format(f['audio'])
                         sig = read_audio(f['audio'], downsample=self.downsample)[0]
                         tensors.append(sig)
+                        num_files += 1
                         lengths.append(sig.size(0))
                         labels.append(utterences[f_rel_no_ext])
                         spk_ids.append(f['spk_id'])
@@ -326,8 +396,9 @@ class VCTK(data.Dataset):
                                    split, '{}_wavs.guia'.format(split)),
                       'w') as guia_f:
                 guia_f.write(files_log)
-            #self._write_info((n*self.chunk_size)+i+1, split)
-            self._write_info(len(idxes), split)
+            self._write_info((n*self.chunk_size)+i+1, split)
+            #self._write_info(num_files, split)
+            """
             if not self.dev_mode:
                 shutil.rmtree(raw_abs_dir, ignore_errors=True)
 
