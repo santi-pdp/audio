@@ -20,7 +20,7 @@ def is_audio_file(filename):
     return any(filename.endswith(extension) for extension in AUDIO_EXTENSIONS)
 
 def make_manifest(dir):
-    audios = []
+    audios = {}
     dir = os.path.expanduser(dir)
     for target in sorted(os.listdir(dir)):
         d = os.path.join(dir, target)
@@ -33,7 +33,9 @@ def make_manifest(dir):
                     spk_id = root.split('/')[-1]
                     path = os.path.join(root, fname)
                     item = path
-                    audios.append({'audio':item, 'spk_id':spk_id})
+                    if spk_id not in audios:
+                        audios[spk_id] = []
+                    audios[spk_id].append({'audio':item, 'spk_id':spk_id})
     return audios
 
 def read_audio(fp, downsample=True):
@@ -253,18 +255,25 @@ class VCTK(data.Dataset):
         print("Found {} audio files and {} utterences".format(len(audios), 
                                                               len(utterences)))
         self.max_len = 0
+        tr_idxes = []
+        va_idxes = []
+        te_idxes = []
         # prepare splits indexes
-        random.shuffle(list(range(len(audios))))
-        N_train = int(np.ceil(len(audios) * self.train_size))
-        N_test = int(np.floor(len(audios) * self.test_size))
-        N_valid = int(np.ceil(len(audios) * self.valid_size))
-        print('Train size: {}'.format(N_train))
-        print('Test size: {}'.format(N_test))
-        print('Valid size: {}'.format(N_valid))
-        assert N_train + N_test + N_valid == len(audios)
-        split_idxes = [audios[:N_train], 
-                       audios[N_train:N_train + N_valid],
-                       audios[-N_test:]]
+        #random.shuffle(list(range(len(audios))))
+        for spk_id, manifest in audios.items():
+            random.shuffle(manifest)
+            #print('Train size: {}'.format(N_train))
+            #print('Test size: {}'.format(N_test))
+            #print('Valid size: {}'.format(N_valid))
+            N_train = int(np.ceil(len(manifest) * self.train_size))
+            #N_test = int(np.floor(len(manifest) * self.test_size))
+            N_valid = int(np.floor(len(manifest) * self.valid_size))
+            #assert N_train + N_test + N_valid == len(manifest), '{}+{}+{}' \
+            #' != {}'.format(N_train, N_test, N_valid, len(manifest))
+            tr_idxes += manifest[:N_train]
+            va_idxes += manifest[N_train:N_train + N_valid]
+            te_idxes += manifest[N_train + N_valid:]
+        split_idxes = [tr_idxes, va_idxes, te_idxes]
         for split, idxes, processed_abs_dir in zip(splits, split_idxes, 
                                                    processed_abs_dirs):
             # process and save as torch files
