@@ -212,6 +212,11 @@ class MuLawEncoding(object):
 
         """
         mu = self.qc - 1.
+        in_dict = None
+        if isinstance(x, dict):
+            assert 'wav' in x, list(x.keys())
+            in_dict = x.copy()
+            x = x['wav']
         if isinstance(x, np.ndarray):
             x_mu = np.sign(x) * np.log1p(mu * np.abs(x)) / np.log1p(mu)
             x_mu = ((x_mu + 1) / 2 * mu + 0.5).astype(int)
@@ -221,7 +226,11 @@ class MuLawEncoding(object):
             mu = torch.FloatTensor([mu])
             x_mu = torch.sign(x) * torch.log1p(mu * torch.abs(x)) / torch.log1p(mu)
             x_mu = ((x_mu + 1) / 2 * mu + 0.5).long()
-        return x_mu
+        if in_dict is not None:
+            in_dict['wav'] = x_mu
+            return in_dict
+        else:
+            return x_mu
 
 class MuLawExpanding(object):
     """Decode mu-law encoded signal.  For more info see the
@@ -268,7 +277,8 @@ class MultiAcoFeats(object):
     def __init__(self, sr=16000, n_fft=1024, hop_length=80,
                  win_length=320, window='hann', noise_dir=None, 
                  snr_levels=[0, 5, 10], n_mels=128, 
-                 mfcc_order=20, augmentation=True):
+                 mfcc_order=20, augmentation=True,
+                 dynamic_norm_spec=False):
         self.sr = sr
         self.n_fft = n_fft
         self.hop_length = hop_length
@@ -276,6 +286,7 @@ class MultiAcoFeats(object):
         self.window = window
         self.mfcc_order = mfcc_order
         self.n_mels = n_mels
+        self.dynamic_norm_spec = dynamic_norm_spec
         self.mel = MEL(sr=sr, n_fft=n_fft, hop_length=hop_length,
                        n_mels=n_mels)
         if augmentation:
@@ -313,9 +324,12 @@ class MultiAcoFeats(object):
         ret = {'lf0':torch.FloatTensor(lf0).view(-1, 1),
                'uv':torch.FloatTensor(uv.astype(np.float32)).view(-1, 1)}
         tot_frames = T
-        # --- All librosa processes will be trimmed to same frames as in pysptk
+
         # MelSpectrum and MFCCs
         mel = self.mel(tensor).transpose(0, 1).squeeze(2)
+        # do compression?
+        if self.dynamic_norm_spec:
+            mel = torch.log1p(mel * 10000) / torch.log(torch.FloatTensor([10]))
         ret['mel_spec'] = mel[:tot_frames]
         mfcc = librosa.feature.mfcc(y=t_npy, sr=self.sr,
                                     n_fft=self.n_fft,
@@ -721,13 +735,16 @@ class Chopper(object):
 
 class ZNorm(object):
 
-    def __init__(self, stats):
+    def __init__(self, stats, exclude_keys=[]):
         assert isinstance(stats, dict), type(stats)
         self.stats = stats
+        self.exclude_keys = exclude_keys
 
     def __call__(self, data):
         assert isinstance(data, dict), type(data)
         for k, v in self.stats.items():
+            if k in self.exclude_keys:
+                continue
             mean = v['mean']
             std = v['std']
             data[k] = (data[k] - mean) / std
@@ -746,3 +763,16 @@ class MinMaxNorm(object):
             max_ = v['max']
             data[k] = (data[k] - min_) / (max_ - min_)
         return data
+
+class PicturizeWav(object):
+    """ Convert waveform into 2-D picture """
+   
+    def __call__(self, data):
+       assert isinstance(data, dict), type(data)
+       assert 'wav' in data, list(data.keys())
+       # wav is a floattensor with normalized waveform
+       # chunk it into pieces of 160 samples ( no padding in end)
+       N = wav.size(0) // 160
+       raise NotImplementedError
+
+
