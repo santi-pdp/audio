@@ -8,6 +8,7 @@ import torch
 import torchaudio
 import pickle
 import re
+import string
 import random
 import numpy as np
 from collections import OrderedDict, Counter
@@ -16,6 +17,11 @@ AUDIO_EXTENSIONS = [
     '.wav', '.mp3', '.flac', '.sph', '.ogg', '.opus',
     '.WAV', '.MP3', '.FLAC', '.SPH', '.OGG', '.OPUS',
 ]
+
+def clean_txt(txt):
+    clean_s = txt.lower()
+    clean_s = re.sub('['+string.punctuation+']', '', clean_s)
+    return clean_s
 
 def is_audio_file(filename):
     return any(filename.endswith(extension) for extension in AUDIO_EXTENSIONS)
@@ -132,7 +138,7 @@ class VCTK(data.Dataset):
         self.cached_pt = 0
         self.split = split
         self.maxlen = maxlen
-        # if there are labs within this root, use them for word spotting
+        # if there are labs within this root, use them for chunking
         self.labs_root = labs_root
         self.store_chunked = store_chunked
         self.max_chunks_file = max_chunks_file
@@ -310,7 +316,7 @@ class VCTK(data.Dataset):
             os.unlink(file_path)
         return raw_abs_dir, dset_abs_path, processed_abs_dirs, splits
 
-    def build_vocabs(self, dset_abs_path):
+    def build_vocabs(self, dset_abs_path, txt_data=None, max_words=None):
         # Build the statistics out of training set
         # get num of spk ids
         with open(os.path.join(dset_abs_path,
@@ -340,6 +346,28 @@ class VCTK(data.Dataset):
                 spk2data[spk] = {'gender':gender[i],
                                  'accent':accent[i]}
             self.spk2data = spk2data
+        if txt_data is not None:
+            from collections import OrderedDict, Counter
+            allwords = []
+            prog = re.compile('\s+')
+            for sentence in txt_data:
+                clean_s = clean_txt(sentence)
+                allwords += [word.rstrip() for word in \
+                             prog.split(clean_s)]
+            wordcount = Counter(allwords)
+            word2idx = OrderedDict()
+            word2idx['<OOV>'] = 0
+            if max_words is None:
+                # put whole vocab size
+                max_words = len(wordcount) + 1
+            print('Total vocab size found: ', len(wordcount))
+            for ii, ww in enumerate(wordcount.most_common(max_words - 1)):
+                word = ww[0]
+                word2idx[word] = ii + 1
+                if ii < 10:
+                    print(word)
+            print('Total FINAL vocab size found: ', len(word2idx))
+            self.word2idx = word2idx
 
     def download(self):
         # first, deal with data download/unzip
@@ -595,20 +623,21 @@ class AcoVCTK(VCTK):
         self.maxlen = maxlen
         self.hop_length = hop_length
         self.prepare_data()
+        if maxlen is not None:
+            print('WARNING: txt returned might not be aligned with cut'
+                  'utterance because of maxlen specified!')
 
     def prepare_data(self):
         # first, deal with data download/unzip
         raw_abs_dir, dset_abs_path, processed_abs_dirs, \
         splits = self.data_download()
-        print('raw_abs_dir: ', raw_abs_dir)
-        print('dset_abs_path: ', dset_abs_path)
-        print('processed_abs_dirs: ', processed_abs_dirs)
-        print('splits: ', splits)
         if not os.path.exists(os.path.join(dset_abs_path, 'aco')):
             raise ValueError('Pre-computed aco features not available!')
         # audios and acos will be loaded
         # first check which audios exsit
         audios = make_manifest(dset_abs_path)
+        self.utterences = load_txts(dset_abs_path)
+        utterences = self.utterences
         print("Found {} speakers".format(len(audios)))
         self.max_len = 0
         tr_idxes = []
@@ -623,7 +652,22 @@ class AcoVCTK(VCTK):
             va_idxes += manifest[N_train:N_train + N_valid]
             te_idxes += manifest[N_train + N_valid:]
         split_idxes = [tr_idxes, va_idxes, te_idxes]
-        self.build_vocabs(dset_abs_path)
+        # clean up the idxes by considering only those with text transcription
+        clean_splits = []
+        for idxes in split_idxes:
+            clean_splits.append([])
+            for i, f in enumerate(idxes):
+                if 'wav48' in f['audio']:
+                    txt_dir = os.path.dirname(f['audio']).replace("wav48", "txt")
+                else:
+                    # wav16 here
+                    txt_dir = os.path.dirname(f['audio']).replace("wav16", "txt")
+                if os.path.exists(txt_dir):
+                    clean_splits[-1].append(f)
+        split_idxes = clean_splits[:]
+        tr_idxes, va_idxes, te_idxes = split_idxes
+        self.build_vocabs(dset_abs_path, [utt for utt in utterences.values()])
+        print('Spk2idx len: ', len(self.spk2idx))
         self.num_samples = len(tr_idxes) + len(va_idxes) + len(te_idxes)
         #print('te_idxes: ', te_idxes)
         if self.split == 'train':
@@ -646,42 +690,46 @@ class AcoVCTK(VCTK):
         sample = self.curr_split[index]
         audio = sample['audio']
         spk_id = sample['spk_id']
-        print('selecting audio: ', audio)
+        #print('selecting audio: ', audio)
         if 'wav48' in audio:
             aco_dir = os.path.dirname(audio).replace("wav48", "aco")
+            txt_dir = os.path.dirname(audio).replace("wav48", "txt")
         else:
             # wav16 here
             aco_dir = os.path.dirname(audio).replace("wav16", "aco")
+            txt_dir = os.path.dirname(audio).replace("wav16", "txt")
+        # read text
         parent_path = aco_dir
         basename = os.path.splitext(os.path.basename(audio))[0]
+        text = self.utterences[basename]
         aco_file = os.path.join(parent_path, 
                                 basename)
         cc_file = aco_file + '.cc'
         lf0_file = aco_file + '.lf0'
         fv_file = aco_file + '.fv'
-        print('Loading cc file: ', cc_file)
+        #print('Loading cc file: ', cc_file)
         if not os.path.exists(aco_file + '.cc'):
             raise FileNotFoundError('File {} not found!'.format(cc_file))
         
         # load the audio signal
         sig, sr = torchaudio.load(audio)
-        print('Loaded signal with {} samples'.format(sig.size()))
-        print('Sampling rate: ', sr)
+        #print('Loaded signal with {} samples'.format(sig.size()))
+        #print('Sampling rate: ', sr)
 		# read cc file
         cc_sig = read_aco_file(cc_file).reshape((-1, 40))
         fv_sig = read_aco_file(fv_file).reshape((-1, 1))
         lf0_sig = read_aco_file(lf0_file).reshape((-1, 1))
-        print('cc sig shape: ', cc_sig.shape)
-        print('fv sig shape: ', fv_sig.shape)
-        print('lf0 sig shape: ', lf0_sig.shape)
+        #print('cc sig shape: ', cc_sig.shape)
+        #print('fv sig shape: ', fv_sig.shape)
+        #print('lf0 sig shape: ', lf0_sig.shape)
 
         # pad wav to achieve same num of samples to have N aco winds
         tot_len = int(fv_sig.shape[0] * 80)
         diff = tot_len - sig.size(0)
         if diff > 0:
             sig = torch.cat((sig, torch.zeros(diff, 1)), dim=0)
-        print('Post pad sig size: ', sig.size())
-        print('Post pad cc size: ', cc_sig.shape[0])
+        #print('Post pad sig size: ', sig.size())
+        #print('Post pad cc size: ', cc_sig.shape[0])
 
         if self.maxlen is not None and self.maxlen < sig.size(0):
             # trim with random chunk
@@ -690,12 +738,12 @@ class AcoVCTK(VCTK):
             end_i = beg_i + self.maxlen
             sig = sig[beg_i:end_i]
             # select proper acoustic window
-            print('Maxlen from {} to {} in time'.format(beg_i, end_i))
+            #print('Maxlen from {} to {} in time'.format(beg_i, end_i))
             # divide time index by stride to obtain window
             win_beg_i = beg_i // 80
             win_end_i = end_i // 80
-            print('Maxlen from CEPS {} to {} tim time'.format(win_beg_i,
-                                                              win_end_i))
+            #print('Maxlen from CEPS {} to {} tim time'.format(win_beg_i,
+            #                                                  win_end_i))
             cc_sig = cc_sig[win_beg_i:win_end_i, :]
             fv_sig = fv_sig[win_beg_i:win_end_i, :]
             lf0_sig = lf0_sig[win_beg_i:win_end_i, :]
@@ -714,7 +762,7 @@ class AcoVCTK(VCTK):
             # remove prefix to match spk ids in speaker-info.txt
             spk_id = spk_id[1:]
 
-        return sig, target, spk_id
+        return sig, target, spk_id, clean_txt(text)
 
     def __len__(self):
         return len(self.curr_split)
