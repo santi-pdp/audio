@@ -12,6 +12,11 @@ try:
 except ImportError:
     librosa = None
 
+try:
+    import ahoproc_tools.interpolate as apt
+except ImportError:
+    apt = None
+
 
 class Compose(object):
     """Composes several transforms together.
@@ -294,8 +299,6 @@ class MultiAcoFeats(object):
                                      snr_levels=snr_levels)
             self.clipping = Clipping()
             self.chopper = Chopper()
-            self.denormalizer = Scale(1. / ((2 ** 15) - 1))
-            self.normalizer = Scale((2 ** 15) - 1)
 
     def __call__(self, tensor):
         """
@@ -308,6 +311,7 @@ class MultiAcoFeats(object):
         import pysptk
         from ahoproc_tools.interpolate import interpolation
         t_npy = tensor.cpu().squeeze(1).numpy()
+        #print('t_npy shape: ', t_npy.shape)
         seqlen = t_npy.shape[0]
         T = seqlen // self.hop_length
         # compute LF0 and UV
@@ -363,10 +367,7 @@ class MultiAcoFeats(object):
         if hasattr(self, 'chopper'):
             do_chop = random.random() > 0.5
             if do_chop:
-                # unorm to 16-bit scale for VAD in chopper
-                scaled_t = self.denormalizer(ntensor).numpy()
-                ntensor = self.chopper(scaled_t, self.sr)
-                ntensor = self.normalizer(ntensor)
+                ntensor = self.chopper(ntensor, self.sr)
 
         if hasattr(self, 'additive'):
             do_add = random.random() > 0.5
@@ -377,15 +378,17 @@ class MultiAcoFeats(object):
             do_clip = random.random() > 0.5
             if do_clip:
                 ntensor = self.clipping(ntensor.numpy())
-        ret['nwav'] = ntensor.view((-1, 1))
-        ret['wav'] = tensor.view((-1, 1))
+        ret['wav'] = ntensor.view((-1, 1))
+        ret['cwav'] = tensor.view((-1, 1))
         return ret
 
 
 
 class Additive(object):
 
-    def __init__(self, noises_dir, snr_levels=[0, 5, 10], do_IRS=False):
+    def __init__(self, noises_dir, snr_levels=[0, 5, 10], do_IRS=False,
+                 prob=0.5):
+        self.prob = prob
         self.noises_dir = noises_dir
         self.snr_levels = snr_levels
         self.do_IRS = do_IRS
@@ -407,8 +410,10 @@ class Additive(object):
                 print(log_noise_load)
         self.eps = 1e-22
 
-    def __call__(self, wav, srate, nbits=16):
+    def __call__(self, wav, srate=16000, nbits=16):
         """ Add noise to clean wav """
+        if isinstance(wav, torch.Tensor):
+            wav = wav.numpy()
         noise_idx = np.random.choice(list(range(len(self.noises))), 1)
         sel_noise = self.noises[np.asscalar(noise_idx)]
         noise = sel_noise['data']
@@ -636,6 +641,8 @@ class Clipping(object):
         self.clip_factors = clip_factors
 
     def __call__(self, wav):
+        if isinstance(wav, torch.Tensor):
+            wav = wav.numpy()
         cf = np.random.choice(self.clip_factors, 1)
         clip = np.maximum(wav, cf * np.min(wav))
         clip = np.minimum(wav, cf * np.max(wav))
@@ -650,6 +657,9 @@ class Chopper(object):
         self.max_chops = max_chops
         # create VAD to get speech chunks
         self.vad = webrtcvad.Vad(2)
+        # make scalers to norm/denorm
+        self.denormalizer = Scale(1. / ((2 ** 15) - 1))
+        self.normalizer = Scale((2 ** 15) - 1)
 
     def vad_wav(self, wav, srate):
         """ Detect the voice activity in the 16-bit mono PCM wav and return
@@ -723,14 +733,22 @@ class Chopper(object):
             chopped_wav[chop_beg:chop_end] = 0
         return chopped_wav
 
-    def __call__(self, wav, srate):
+    def __call__(self, wav, srate=16000):
+        if isinstance(wav, np.ndarray):
+            wav = torch.FloatTensor(wav)
+        # unorm to 16-bit scale for VAD in chopper
+        wav = self.denormalizer(wav)
+        if isinstance(wav, torch.Tensor):
+            wav = wav.numpy()
         wav = wav.astype(np.int16)
         if wav.ndim > 1:
             wav = wav.reshape((-1,))
         # get speech regions for proper chopping
         speech_regions = self.vad_wav(wav, srate)
-        chopped = self.chop_wav(wav, srate, speech_regions).astype(np.float32)
-        return torch.FloatTensor(chopped)
+        chopped = self.chop_wav(wav, srate, 
+                                speech_regions).astype(np.float32)
+        chopped = self.normalizer(torch.FloatTensor(chopped))
+        return chopped
 
 
 class ZNorm(object):
@@ -752,17 +770,121 @@ class ZNorm(object):
 
 class MinMaxNorm(object):
 
-    def __init__(self, stats):
+    def __init__(self, stats, out_range=(0, 1), exclude_keys=[]):
         assert isinstance(stats, dict), type(stats)
         self.stats = stats
+        self.exclude_keys = exclude_keys
+        self.out_range = out_range
 
     def __call__(self, data):
-        assert isinstance(data, dict), type(data)
-        for k, v in self.stats.items():
-            min_ = v['min']
-            max_ = v['max']
-            data[k] = (data[k] - min_) / (max_ - min_)
+        omin, omax = self.out_range
+        if isinstance(data, dict):
+            for k, v in self.stats.items():
+                if k in self.exclude_keys:
+                    continue
+                min_ = v['min']
+                max_ = v['max']
+                R = (omax - omin) / (max_ - min_)
+                data[k] = R * (data[k] - min_) + omin
+        elif isinstance(data.cpu(), torch.Tensor):
+            # just appoly stats
+            min_ = self.stats['min']
+            max_ = self.stats['max']
+            R = (omax - omin) / (max_ - min_)
+            data = R * (data - min_) + omin
+        else:
+            raise ValueError('Unsupported type to denorm: ', type(data))
         return data
+
+class MinMaxDenorm(object):
+
+    def __init__(self, stats, in_range=(0, 1), exclude_keys=[]):
+        assert isinstance(stats, dict), type(stats)
+        self.stats = stats
+        self.exclude_keys = exclude_keys
+        self.in_range = in_range
+
+    def __call__(self, data):
+        imin, imax = self.in_range
+        if isinstance(data, dict):
+            for k, v in self.stats.items():
+                if k in self.exclude_keys:
+                    continue
+                min_ = v['min']
+                max_ = v['max']
+                R = (imax - imin) / (max_ - min_)
+                data[k] = (data[k] - imin) / R + min_
+        elif isinstance(data.cpu(), torch.Tensor):
+            # just appoly stats
+            min_ = self.stats['min']
+            max_ = self.stats['max']
+            R = (imax - imin) / (max_ - min_)
+            data = (data - imin) / R + min_
+        else:
+            raise ValueError('Unsupported type to denorm: ', type(data))
+        return data
+
+class NoiseBrancher(object):
+
+    def __init__(self, noise_modules):
+        self.noise_modules = noise_modules
+
+    def __call__(self, wav):
+        ret = {'cwav': wav}
+        nwav = wav.clone()
+        for noise_module in self.noise_modules:
+            nwav = noise_module(nwav)
+        ret['wav'] = nwav.view(-1, 1)
+        return ret
+
+class InterpolateAhocoder(object):
+    """ Will interpolate voiced frequency and lf0, knowing
+        their Ahocoder values 1000, and -10000000000 respectively 
+        and then returning a tensor with +1 unvoiced/voiced flag 
+        dimension 
+    """
+    def __init__(self, normalize=True, stats=None):
+        self.lf0_k = -10000000000
+        self.fv_k = 1000
+        # voiced freq will be normalized if true
+        self.normalize = normalize
+        # if stats available, will be normalized min-max
+        self.stats = stats
+        if stats is not None:
+            self.normalizer = MinMaxNorm(stats, out_range=(-1, 1))
+        else:
+            self.normalizer = None
+
+    def __call__(self, aco_tensor):
+        # aco_tensor: [T, cc_order + 2] dimensional, where T are frames
+        if apt is None:
+            raise ValueError('Please install ahoproc_tools to '
+                             'process ahocoder data')
+        # voiced frequency is [-2] dim
+        fv = aco_tensor[:, -2].contiguous().view(-1, 1)
+        fv_interp, uv = apt.interpolation(fv.numpy(),
+                                          self.fv_k)
+        i_fv_t = torch.FloatTensor(fv_interp)
+        if self.normalize:
+            i_fv_t = i_fv_t / 1000
+        # lf0 is [-1] dim
+        lf0 = aco_tensor[:, -1].contiguous().view(-1, 1)
+        lf0_interp, uv = apt.interpolation(lf0.numpy(),
+                                           self.lf0_k)
+        if np.any(lf0_interp <= self.lf0_k):
+            # totally unvoiced segment, put min F0
+            lf0_interp = np.log(60) * np.ones(lf0_interp.shape)
+            uv = np.zeros(uv.shape)
+        i_lf0_t = torch.FloatTensor(lf0_interp)
+        uv_t = torch.FloatTensor(np.array(uv, dtype=np.float32))
+        # compose final tensor with +1 dim
+        aco_tensor = torch.cat((aco_tensor[:, :-2], i_fv_t, i_lf0_t),
+                               dim=1)
+        if self.stats is not None:
+            aco_tensor = self.normalizer(aco_tensor)
+        aco_tensor = torch.cat((aco_tensor, uv_t), dim=1)
+        return aco_tensor
+
 
 class PicturizeWav(object):
     """ Convert waveform into 2-D picture """
